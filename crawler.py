@@ -8,14 +8,15 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import requests
 from bs4 import BeautifulSoup
 
-
-DEFAULT_MAX_DEPTH = 2
-DEFAULT_TIMEOUT = 10
-MAX_REDIRECTS = 10
+from config import MAX_DEPTH, MAX_PAGES, MAX_REDIRECTS, REQUEST_HEADERS, REQUEST_TIMEOUT
 
 
 class CrawlError(Exception):
     """A target could not be crawled."""
+
+
+class AccessRestricted(CrawlError):
+    """The site appears to be rejecting or limiting the crawler."""
 
 
 @dataclass
@@ -25,6 +26,46 @@ class CrawlResult:
     target: str
     urls: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    final_url: str | None = None
+    redirects: dict[str, str] = field(default_factory=dict)
+    page_limit_reached: bool = False
+    stopped_reason: str | None = None
+
+
+def check_access(response: requests.Response) -> None:
+    """Report explicit challenge indicators and common access restrictions."""
+    indicators = []
+    if response.status_code in (403, 429):
+        explanations = {
+            403: "HTTP 403 Forbidden: the website rejected this request",
+            429: "HTTP 429 Too Many Requests: the website is limiting requests",
+        }
+        indicators.append(explanations[response.status_code])
+    if response.headers.get("cf-mitigated", "").lower() == "challenge":
+        indicators.append("Cloudflare challenge detected")
+
+    content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type in ("text/html", "application/xhtml+xml"):
+        soup = BeautifulSoup(response.content, "html.parser")
+        title = soup.title.get_text(" ", strip=True).lower() if soup.title else ""
+        if title in ("access denied", "just a moment...", "attention required! | cloudflare"):
+            indicators.append(f"challenge or access-denied page title: {title}")
+        if soup.select_one("form#challenge-form, form[action*='/cdn-cgi/challenge-platform/']"):
+            indicators.append("Cloudflare challenge form detected")
+        if soup.select_one("form[action*='/captcha/'], form#captcha-form"):
+            indicators.append("CAPTCHA challenge form detected")
+    if indicators:
+        raise AccessRestricted(
+            f"Automated access may be restricted at {response.url}. "
+            + "; ".join(indicators) + "."
+        )
+
+
+def http_error_message(response: requests.Response) -> str:
+    """Provide a useful description of a failed HTTP response."""
+    if response.status_code == 404:
+        return f"HTTP 404 Not Found: the requested page was not found: {response.url}"
+    return f"HTTP {response.status_code} {response.reason}: {response.url}"
 
 
 def normalize_url(url: str) -> str:
@@ -56,12 +97,19 @@ def normalize_url(url: str) -> str:
     return urlunsplit((scheme, host, parts.path or "/", parts.query, ""))
 
 
-def crawl(target: str, max_depth: int = DEFAULT_MAX_DEPTH, timeout: float = DEFAULT_TIMEOUT) -> CrawlResult:
+def crawl(
+    target: str,
+    max_depth: int = MAX_DEPTH,
+    timeout: float = REQUEST_TIMEOUT,
+    max_pages: int = MAX_PAGES,
+) -> CrawlResult:
     """Crawl same-host links breadth-first, starting with the target at depth zero."""
     if max_depth < 0:
         raise ValueError("maximum depth must be non-negative")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout must be a positive, finite number")
+    if not isinstance(max_pages, int) or isinstance(max_pages, bool) or max_pages < 1:
+        raise ValueError("maximum pages must be a positive integer")
     target = normalize_url(target)
     target_host = urlsplit(target).hostname
     result = CrawlResult(target=target, urls=[target])
@@ -70,6 +118,7 @@ def crawl(target: str, max_depth: int = DEFAULT_MAX_DEPTH, timeout: float = DEFA
     queue = deque([(target, 0)])
 
     with requests.Session() as session:
+        session.headers.update(REQUEST_HEADERS)
         while queue:
             url, depth = queue.popleft()
             if url in visited:
@@ -81,7 +130,11 @@ def crawl(target: str, max_depth: int = DEFAULT_MAX_DEPTH, timeout: float = DEFA
                     if current in visited:
                         break
                     visited.add(current)
+                    # Check every redirect before following it to preserve the same-host boundary.
                     response = session.get(current, timeout=timeout, allow_redirects=False)
+                    if url == target:
+                        result.final_url = current
+                    check_access(response)
                     if response.is_redirect:
                         if len(redirects) >= MAX_REDIRECTS:
                             raise CrawlError("too many redirects")
@@ -95,12 +148,17 @@ def crawl(target: str, max_depth: int = DEFAULT_MAX_DEPTH, timeout: float = DEFA
                         if next_url in redirects:
                             raise CrawlError("redirect loop detected")
                         if next_url not in discovered:
+                            if len(discovered) >= max_pages:
+                                result.page_limit_reached = True
+                                break
                             discovered.add(next_url)
                             result.urls.append(next_url)
+                        result.redirects[current] = next_url
                         current = next_url
                         continue
 
-                    response.raise_for_status()
+                    if response.status_code >= 400:
+                        raise CrawlError(http_error_message(response))
                     content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
                     if depth < max_depth and content_type in ("text/html", "application/xhtml+xml"):
                         soup = BeautifulSoup(response.content, "html.parser")
@@ -119,15 +177,23 @@ def crawl(target: str, max_depth: int = DEFAULT_MAX_DEPTH, timeout: float = DEFA
                             except ValueError:
                                 continue
                             if urlsplit(linked_url).hostname == target_host and linked_url not in discovered:
+                                if len(discovered) >= max_pages:
+                                    result.page_limit_reached = True
+                                    continue
                                 discovered.add(linked_url)
                                 result.urls.append(linked_url)
                                 queue.append((linked_url, depth + 1))
                     break
             except requests.exceptions.Timeout as exc:
-                message = f"network timeout while requesting {current}"
+                message = f"network timeout while requesting {current}: the website did not respond in time"
                 if url == target:
                     raise CrawlError(message) from exc
                 result.warnings.append(message)
+            except AccessRestricted as exc:
+                if url == target:
+                    raise AccessRestricted(f"{exc} Scan terminated before crawling could begin.") from exc
+                result.stopped_reason = str(exc)
+                break
             except (requests.exceptions.RequestException, CrawlError) as exc:
                 message = f"could not fetch {current}: {exc}"
                 if url == target:
