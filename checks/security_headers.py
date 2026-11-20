@@ -29,14 +29,17 @@ class SecurityHeadersCheck(VulnerabilityCheck):
 
         for url in target.urls:
             try:
-                response = target.session.head(url, timeout=10, allow_redirects=False)
+                # Follow redirects to check headers on the final response.
+                # This ensures we evaluate security headers on the page
+                # the user actually receives, not intermediate redirects.
+                response = target.session.get(url, timeout=10, allow_redirects=True)
+
+                missing_headers = self._check_headers(response)
+                if missing_headers:
+                    missing_headers_per_url[url] = missing_headers
             except Exception:
                 # Skip URLs that cannot be accessed during header check
                 continue
-
-            missing_headers = self._check_headers(response)
-            if missing_headers:
-                missing_headers_per_url[url] = missing_headers
 
         # Create one finding per missing header to avoid duplication
         all_missing = set()
@@ -59,7 +62,12 @@ class SecurityHeadersCheck(VulnerabilityCheck):
 
     @staticmethod
     def _check_headers(response) -> set[str]:
-        """Return set of missing security headers for this response."""
+        """
+        Return set of missing security headers for this response.
+
+        Checks the final response after following redirects to ensure
+        we evaluate headers on the actual content served to users.
+        """
         missing = set()
         response_headers = {k.lower(): v for k, v in response.headers.items()}
 

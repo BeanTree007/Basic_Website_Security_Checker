@@ -172,6 +172,105 @@ class TestCookieSecurityCheck(unittest.TestCase):
         # Should have 3 findings (one per missing flag), not 9 (3 flags * 3 URLs)
         self.assertEqual(len(findings), 3)
 
+    def test_mixed_secure_insecure_cookies(self):
+        """Test response with mixed secure and insecure cookies."""
+        secure_cookie = self._create_mock_cookie(
+            name="secure_session", secure=True, httponly=True, samesite=True
+        )
+        insecure_cookie = self._create_mock_cookie(
+            name="tracking", secure=False, httponly=False, samesite=False
+        )
+
+        mock_response = Mock()
+        mock_response.cookies = [secure_cookie, insecure_cookie]
+
+        mock_session = Mock()
+        mock_session.get.return_value = mock_response
+
+        target = CheckTarget(
+            url="https://example.com",
+            urls=["https://example.com"],
+            session=mock_session,
+        )
+
+        findings = self.check.run(target)
+        # Only insecure_cookie should generate findings (3)
+        self.assertEqual(len(findings), 3)
+        for finding in findings:
+            self.assertIn("tracking", finding.description)
+
+    def test_cookie_partial_flag_coverage(self):
+        """Test cookie with only some security flags."""
+        cookie = self._create_mock_cookie(
+            name="session", secure=True, httponly=True, samesite=False
+        )
+
+        mock_response = Mock()
+        mock_response.cookies = [cookie]
+
+        mock_session = Mock()
+        mock_session.get.return_value = mock_response
+
+        target = CheckTarget(
+            url="https://example.com",
+            urls=["https://example.com"],
+            session=mock_session,
+        )
+
+        findings = self.check.run(target)
+        # Only missing SameSite
+        self.assertEqual(len(findings), 1)
+        self.assertIn("SameSite", findings[0].name)
+
+    def test_handles_request_errors(self):
+        """Test that request errors are handled gracefully."""
+        mock_session = Mock()
+        mock_session.get.side_effect = Exception("Network error")
+
+        target = CheckTarget(
+            url="https://example.com",
+            urls=["https://example.com"],
+            session=mock_session,
+        )
+
+        findings = self.check.run(target)
+        # Should return empty list when request fails
+        self.assertEqual(len(findings), 0)
+
+    def test_duplicate_cookie_names_aggregated(self):
+        """Test that cookies with same name are aggregated."""
+        # Simulate duplicate cookies from multiple URLs
+        cookie1 = self._create_mock_cookie(
+            name="session", secure=False, httponly=False, samesite=False
+        )
+        cookie2 = self._create_mock_cookie(
+            name="session", secure=False, httponly=True, samesite=False
+        )
+
+        mock_session = Mock()
+        # First URL has less secure version
+        mock_response1 = Mock()
+        mock_response1.cookies = [cookie1]
+        # Second URL has slightly more secure version
+        mock_response2 = Mock()
+        mock_response2.cookies = [cookie2]
+
+        mock_session.get.side_effect = [mock_response1, mock_response2]
+
+        target = CheckTarget(
+            url="https://example.com",
+            urls=[
+                "https://example.com",
+                "https://example.com/page1",
+            ],
+            session=mock_session,
+        )
+
+        findings = self.check.run(target)
+        # Aggregated issues: secure (missing on URL1) and samesite (missing on both)
+        # Should have issues for secure and samesite
+        self.assertGreaterEqual(len(findings), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

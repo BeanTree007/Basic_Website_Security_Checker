@@ -8,13 +8,19 @@ class CookieSecurityCheck(VulnerabilityCheck):
     """Detect insecure cookie attributes."""
 
     def run(self, target: CheckTarget) -> list[Finding]:
-        """Check for insecure cookie attributes on the target website."""
+        """
+        Check for insecure cookie attributes on the target website.
+
+        Analyzes all cookies received from discovered URLs and reports
+        missing security flags (HttpOnly, Secure, SameSite).
+        """
         findings: list[Finding] = []
         all_issues: dict[str, set[str]] = {}  # cookie_name -> set of issues
 
         for url in target.urls:
             try:
-                response = target.session.get(url, timeout=10, allow_redirects=False)
+                # Use GET to ensure cookies are sent and received in response
+                response = target.session.get(url, timeout=10, allow_redirects=True)
             except Exception:
                 # Skip URLs that cannot be accessed during cookie check
                 continue
@@ -42,21 +48,34 @@ class CookieSecurityCheck(VulnerabilityCheck):
 
     @staticmethod
     def _check_cookies(response) -> dict[str, set[str]]:
-        """Return dict of cookie names to missing security attributes."""
+        """
+        Return dict of cookie names to missing security attributes.
+
+        Checks three security flags:
+        - HttpOnly: Prevents JavaScript from accessing the cookie
+        - Secure: Ensures cookie is only sent over HTTPS
+        - SameSite: Prevents CSRF attacks by restricting cross-site cookie submission
+        """
         issues: dict[str, set[str]] = {}
 
         for cookie in response.cookies:
             cookie_issues = set()
 
             # Check for HttpOnly flag
+            # This flag prevents JavaScript (via document.cookie) from accessing the cookie,
+            # reducing XSS vulnerability surface area.
             if not cookie.has_nonstandard_attr("HttpOnly"):
                 cookie_issues.add("httponly")
 
             # Check for Secure flag
+            # This flag ensures the cookie is only transmitted over HTTPS connections,
+            # preventing interception over plain HTTP.
             if not cookie.secure:
                 cookie_issues.add("secure")
 
             # Check for SameSite attribute
+            # This attribute restricts cookie submission in cross-site requests,
+            # protecting against CSRF attacks. Values: Strict, Lax, or None.
             if not cookie.has_nonstandard_attr("SameSite"):
                 cookie_issues.add("samesite")
 

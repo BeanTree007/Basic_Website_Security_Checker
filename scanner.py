@@ -48,7 +48,7 @@ def positive_int(value: str) -> int:
     return result
 
 
-def run_security_checks(target_url: str, discovered_urls: list[str]) -> list[Finding]:
+def run_security_checks(target_url: str, discovered_urls: list[str], verbose: bool = False) -> list[Finding]:
     """Execute all vulnerability checks against the target website."""
     findings: list[Finding] = []
 
@@ -63,10 +63,20 @@ def run_security_checks(target_url: str, discovered_urls: list[str]) -> list[Fin
         ]
 
         for check in checks:
+            check_name = check.__class__.__name__
+            if verbose:
+                print(f"[*] Running {check_name}...")
             try:
-                findings.extend(check.run(check_target))
+                # Pass verbose parameter if the check supports it
+                if hasattr(check.run, '__code__') and 'verbose' in check.run.__code__.co_varnames:
+                    check_findings = check.run(check_target, verbose=verbose)
+                else:
+                    check_findings = check.run(check_target)
+                findings.extend(check_findings)
+                if verbose and check_findings:
+                    print(f"    Found {len(check_findings)} issue(s)")
             except Exception as exc:
-                print(f"Warning: {check.__class__.__name__} failed: {exc}", file=sys.stderr)
+                print(f"Warning: {check_name} failed: {exc}", file=sys.stderr)
 
     return findings
 
@@ -111,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         default=MAX_PAGES,
         help=f"maximum discovered URLs, including redirects (default: {MAX_PAGES})",
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="enable verbose output for debugging",
+    )
     args = parser.parse_args(argv)
 
     # Run the crawler
@@ -143,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
     print("Running Security Checks...")
     print("=" * 60 + "\n")
 
-    findings = run_security_checks(result.target, result.urls)
+    findings = run_security_checks(result.target, result.urls, verbose=args.verbose)
 
     print("Scan Results\n")
     print_findings(findings)
