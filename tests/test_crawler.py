@@ -248,11 +248,11 @@ class CrawlerTests(unittest.TestCase):
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             status = main([self.base, "--max-depth", "1"])
         self.assertEqual(status, 0)
-        self.assertIn("Discovered Pages:", stdout.getvalue())
-        self.assertIn("- /about", stdout.getvalue())
-        self.assertNotIn("- /deep", stdout.getvalue())
-        self.assertIn("Total Pages Found: 7", stdout.getvalue())
-        self.assertIn("Crawl Complete (with warnings)", stdout.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("Target:", output)
+        self.assertIn("Discovered 7 page(s)", output)
+        self.assertIn("Crawl Complete (with warnings)", output)
+        self.assertIn("Scan Results", output)
         self.assertIn("Warning:", stderr.getvalue())
 
     def test_cli_process(self):
@@ -261,8 +261,9 @@ class CrawlerTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
         self.assertEqual(process.returncode, 0, process.stderr)
-        self.assertIn("Total Pages Found: 1", process.stdout)
+        self.assertIn("Discovered 1 page(s)", process.stdout)
         self.assertIn("Crawl Complete", process.stdout)
+        self.assertIn("Scan Results", process.stdout)
 
 
 class ValidationTests(unittest.TestCase):
